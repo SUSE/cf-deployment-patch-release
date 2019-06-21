@@ -1,0 +1,16 @@
+---
+name: release-patcher
+
+templates:
+  bin/pre-start: bin/pre-start
+  config/bpm.yml: config/bpm.yml
+
+  # Overrides for uaa-release.
+  mods/var/vcap/jobs-src/uaa/templates/bin/pre-start.erb.override: var/vcap/jobs-src/uaa/templates/bin/pre-start.erb
+  mods/var/vcap/jobs-src/uaa/templates/bin/uaa.erb.override: var/vcap/jobs-src/uaa/templates/bin/uaa.erb
+  mods/var/vcap/jobs-src/uaa/templates/config/bpm.yml.erb.override: var/vcap/jobs-src/uaa/templates/config/bpm.yml.erb
+
+packages:
+  - patcher
+
+properties: {}

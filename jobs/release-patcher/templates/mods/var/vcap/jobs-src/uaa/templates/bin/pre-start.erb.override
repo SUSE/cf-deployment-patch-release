@@ -1,0 +1,128 @@
+#!/bin/bash
+set -e
+
+echo "uaa-pre-start - starting at `date`"
+
+CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+function update_ca_certificate() {
+  updated_certs=1
+  retry_count=0
+  max_retry_count=3
+
+  set +e
+  until [ $updated_certs -eq 0 ] || [ $retry_count -ge $max_retry_count ]; do
+    echo "trying to run update-ca-certificates..."
+    timeout --signal=KILL 60s /usr/sbin/update-ca-certificates -f -v
+    updated_certs=$?
+    retry_count=$((retry_count + 1))
+  done
+  set -e
+}
+
+# add certs from manifest to OS certs
+rm -f /etc/pki/trust/anchors/uaa_*
+<% p('uaa.ca_certs', []).each_with_index do |cert, i| %>
+    echo "Adding certificate from manifest to OS certs /etc/pki/trust/anchors/uaa_<%= i %>.crt"
+    echo -n '<%= cert %>' >> "/etc/pki/trust/anchors/uaa_<%= i %>.crt"
+<% end %>
+
+update_ca_certificate
+
+# os-conf will write to CERT_FILE in its pre-start, using a copy to prevent race conditions
+INTERNAL_CERT_FILE=/tmp/internal_ca_certificates.crt
+
+cp -f $CERT_FILE $INTERNAL_CERT_FILE
+
+CONF_DIR=/var/vcap/jobs/uaa/config
+CACHE_DIR=/var/vcap/data/uaa/cert-cache
+
+mkdir -p $CACHE_DIR
+
+CERT_CACHE_FILE=$CACHE_DIR/cacerts-cache.txt
+TRUST_STORE_FILE=$CACHE_DIR/cacerts
+
+CERTS=$(grep 'END CERTIFICATE' $INTERNAL_CERT_FILE| wc -l)
+
+function process_certs {
+  echo "Processing certificates for Java cacerts file"
+  rm -f $CERT_CACHE_FILE
+  rm -f $TRUST_STORE_FILE
+  COUNTER=0
+  # Load the cert into the Java keystore
+  TEMP_CA_CERTS=$(mktemp -d)
+
+  cat $INTERNAL_CERT_FILE |
+  awk "split_after==1{n++;split_after=0} /-----END CERTIFICATE-----/ {split_after=1} {print > (\"$TEMP_CA_CERTS/cert\" n \".pem\")}"
+
+
+  for cert in $TEMP_CA_CERTS/*; do
+    cat $cert | /var/vcap/packages/uaa/jdk/bin/keytool -noprompt \
+    -import \
+    -trustcacerts \
+    -alias $(basename $cert) \
+    -keystore $TRUST_STORE_FILE \
+    -storepass changeit
+
+    let COUNTER=COUNTER+1
+    echo "[uaa-ctl]   Processed certificate $COUNTER of $CERTS"
+  done
+
+  if [ "$COUNTER" -eq "$CERTS" ]; then
+    echo "[uaa-ctl] Java keystore creation completed."
+    cp $INTERNAL_CERT_FILE $CERT_CACHE_FILE
+  fi
+  rm -f $INTERNAL_CERT_FILE
+  rm -rf $TEMP_CA_CERTS
+}
+
+
+function setup_directories {
+    mkdir -p /var/vcap/sys/log/uaa
+
+    chown -R vcap:vcap /var/vcap/sys/log/uaa
+
+    # We want to keep packages pristine, since tomcat is modified in place we stage it elsewhere.
+    rm -rf /var/vcap/data/uaa/tomcat
+    mkdir -p /var/vcap/data/uaa/
+    cp -a /var/vcap/packages/uaa/tomcat /var/vcap/data/uaa/
+    cp -a /var/vcap/jobs/uaa/config/tomcat/* /var/vcap/data/uaa/tomcat/conf/
+    chown -R vcap:vcap /var/vcap/data/uaa/
+
+    # We don't think this does anything since the variable is not set
+    # Keeping it currently to discuss whether to remove or whether this is a regression
+    rm -rf $KEY_STORE_FILE
+}
+
+if [ -a "$CERT_CACHE_FILE" ] && [ -a "$TRUST_STORE_FILE" ]; then
+    if  diff "$CERT_CACHE_FILE" "$CERT_FILE" >/dev/null; then
+      echo 'No changes to CA certificates. Will not build Java keystore file.'
+    else
+      echo 'Changes to CA certificates detected.'
+      process_certs
+    fi
+else
+    process_certs
+fi
+
+<% if p('uaa.ldap.sslCertificate', nil) || p('login.ldap.sslCertificate', nil) %>
+    echo "[uaa-pre-start] Installing LDAP certificate"
+    /var/vcap/jobs/uaa/bin/install_crt ldap.crt ldapcert $TRUST_STORE_FILE
+    echo "[uaa-pre-start] Installed LDAP certificate"
+<% end %>
+
+# Install the server's ssl certificate
+<% if p("uaa.ssl.port") != -1 %>
+    echo "[uaa-pre-start] Installing Server SSL certificate"
+    /var/vcap/jobs/uaa/bin/install_uaa_crt uaa.crt
+    echo "[uaa-pre-start] Installed Server SSL certificate"
+<% end %>
+
+chmod g+xw "$TRUST_STORE_FILE"
+ln -fs "$TRUST_STORE_FILE" "$CONF_DIR/cacerts"
+
+setup_directories
+
+echo "uaa-pre-start - completed at `date`"
+
+exit 0

@@ -1,0 +1,5 @@
+name: cf-deployment-patch
+blobstore:
+  provider: local
+  options:
+    blobstore_path: /tmp/blobstore/cf-deployment-patch-release

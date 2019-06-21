@@ -1,0 +1,4 @@
+processes:
+- name: release-patcher
+  executable: /var/vcap/jobs/release-patcher/bin/release-patcher
+  args: []
